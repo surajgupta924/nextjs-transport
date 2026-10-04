@@ -9,7 +9,7 @@ export async function GET() {
   const scope = tenantIdOrError(user); if (scope.response) return scope.response;
   try {
     const where = user.role === "SUPER_ADMIN" ? {} : user.role === "CUSTOMER" ? { tenantId: scope.tenantId!, userId: user.id } : { tenantId: scope.tenantId! };
-    const data = await prisma.customer.findMany({ where, include: { user: { select: { id: true, isActive: true } }, _count: { select: { trips: true } } }, orderBy: { createdAt: "desc" } });
+    const data = await prisma.customer.findMany({ where, select: { id: true, tenantId: true, name: true, email: true, phone: true, address: true, gstin: true, isActive: true, createdAt: true, _count: { select: { trips: true } } }, orderBy: { createdAt: "desc" }, take: 500 });
     return NextResponse.json({ data });
   } catch (error) { return jsonError(error); }
 }
@@ -19,6 +19,16 @@ export async function POST(request: Request) {
   const scope = tenantIdOrError(user); if (scope.response) return scope.response;
   try {
     const body = await request.json(); const tenantId = user.role === "SUPER_ADMIN" ? String(body.tenantId ?? "") : scope.tenantId!;
+    if (Array.isArray(body.items)) {
+      if (body.items.length > 500) return NextResponse.json({ error: "Customer import is limited to 500 rows." }, { status: 400 });
+      if (body.items.some((item: unknown) => !item || typeof item !== "object" || Array.isArray(item))) return NextResponse.json({ error: "The import contains an invalid row." }, { status: 400 });
+      const items = body.items.map((item: Record<string, unknown>) => ({ name: String(item.name ?? "").trim(), email: String(item.email ?? "").trim().toLowerCase() || null, phone: String(item.phone ?? "").trim() || null, address: String(item.address ?? "").trim() || null, gstin: String(item.gstin ?? "").trim() || null }));
+      if (!tenantId || items.some((item: { name: string; email: string | null; phone: string | null }) => item.name.length < 2 || (!item.email && !item.phone) || Boolean(item.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(item.email)))) return NextResponse.json({ error: "Every customer row needs a name and valid email or phone." }, { status: 400 });
+      if (user.role === "SUPER_ADMIN" && !await prisma.tenant.findUnique({ where: { id: tenantId }, select: { id: true } })) return NextResponse.json({ error: "Workspace not found." }, { status: 404 });
+      if (user.role === "TENANT_ADMIN" && body.tenantId && body.tenantId !== user.tenantId) return NextResponse.json({ error: "Workspace access denied." }, { status: 403 });
+      const result = await prisma.customer.createMany({ data: items.map((item: { name: string; email: string | null; phone: string | null; address: string | null; gstin: string | null }) => ({ ...item, tenantId })) });
+      return NextResponse.json({ created: result.count, skipped: 0 });
+    }
     const name = String(body.name ?? "").trim(); const email = String(body.email ?? "").trim().toLowerCase(); const phone = String(body.phone ?? "").trim();
     if (!tenantId || name.length < 2 || (!email && !phone)) return NextResponse.json({ error: "Choose a workspace, customer name, and email or phone." }, { status: 400 });
     if (user.role === "SUPER_ADMIN" && !await prisma.tenant.findUnique({ where: { id: tenantId }, select: { id: true } })) return NextResponse.json({ error: "Workspace not found." }, { status: 404 });
@@ -41,7 +51,16 @@ export async function PATCH(request: Request) {
     const body = await request.json(); const id = String(body.id ?? "");
     const where = user.role === "SUPER_ADMIN" ? { id } : { id, tenantId: scope.tenantId! };
     const existing = await prisma.customer.findFirst({ where }); if (!existing) return NextResponse.json({ error: "Customer not found." }, { status: 404 });
-    const customer = await prisma.customer.update({ where: { id }, data: { ...(body.name !== undefined ? { name: String(body.name).trim() } : {}), ...(body.email !== undefined ? { email: String(body.email).trim().toLowerCase() || null } : {}), ...(body.phone !== undefined ? { phone: String(body.phone).trim() || null } : {}), ...(body.address !== undefined ? { address: String(body.address).trim() || null } : {}), ...(body.gstin !== undefined ? { gstin: String(body.gstin).trim() || null } : {}), ...(body.notes !== undefined ? { notes: String(body.notes).trim() || null } : {}), ...(body.isActive !== undefined ? { isActive: Boolean(body.isActive) } : {}) } });
+    if (existing.userId && body.email !== undefined && !String(body.email).trim()) return NextResponse.json({ error: "A customer with a login must keep an email address." }, { status: 400 });
+    const fields = { ...(body.name !== undefined ? { name: String(body.name).trim() } : {}), ...(body.email !== undefined ? { email: String(body.email).trim().toLowerCase() || null } : {}), ...(body.phone !== undefined ? { phone: String(body.phone).trim() || null } : {}), ...(body.address !== undefined ? { address: String(body.address).trim() || null } : {}), ...(body.gstin !== undefined ? { gstin: String(body.gstin).trim() || null } : {}), ...(body.notes !== undefined ? { notes: String(body.notes).trim() || null } : {}), ...(body.isActive !== undefined ? { isActive: Boolean(body.isActive) } : {}) };
+    const customer = await prisma.$transaction(async (tx) => {
+      const updated = await tx.customer.update({ where: { id }, data: fields });
+      if (existing.userId) {
+        await tx.user.update({ where: { id: existing.userId }, data: { ...(fields.name !== undefined ? { name: fields.name } : {}), ...(fields.email !== undefined ? { email: fields.email ?? "" } : {}), ...(fields.phone !== undefined ? { phone: fields.phone } : {}), ...(fields.isActive !== undefined ? { isActive: fields.isActive } : {}) } });
+        if (fields.isActive === false) await tx.session.deleteMany({ where: { userId: existing.userId } });
+      }
+      return updated;
+    });
     return NextResponse.json({ data: customer });
   } catch (error) { return jsonError(error); }
 }
