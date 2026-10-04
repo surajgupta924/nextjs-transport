@@ -1,0 +1,217 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  SUPER_ADMIN
+  TENANT_ADMIN
+  DRIVER
+  CUSTOMER
+}
+
+enum TripStatus {
+  PENDING
+  IN_TRANSIT
+  DELIVERED
+  CANCELLED
+}
+
+enum PaymentStatus {
+  PAID
+  DUE
+  OVERDUE
+}
+
+enum Plan {
+  STARTER
+  GROWTH
+  BUSINESS
+}
+
+model Tenant {
+  id             String         @id @default(cuid())
+  name           String
+  slug           String         @unique
+  logoUrl        String?
+  logoData       String?        @db.Text
+  email          String?
+  phone          String?
+  address        String?
+  accentColor    String         @default("#2563eb")
+  plan           Plan           @default(STARTER)
+  paidAmount     Decimal        @default(0) @db.Decimal(12, 2)
+  setupComplete  Boolean        @default(false)
+  isActive       Boolean        @default(true)
+  createdAt      DateTime       @default(now())
+  users          User[]
+  trips          Trip[]
+  vehicles       Vehicle[]
+  payments       Payment[]
+  customers      Customer[]
+  expenses       TripExpense[]
+  payrollEntries PayrollEntry[]
+}
+
+model User {
+  id              String         @id @default(cuid())
+  tenantId        String?
+  tenant          Tenant?        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name            String
+  email           String         @unique
+  passwordHash    String
+  role            Role
+  phone           String?
+  avatarUrl       String?
+  firstLogin      Boolean        @default(false)
+  isActive        Boolean        @default(true)
+  createdAt       DateTime       @default(now())
+  assignedTrips   Trip[]         @relation("DriverTrips")
+  sessions        Session[]
+  customerProfile Customer?      @relation("CustomerUser")
+  tripExpenses    TripExpense[]
+  payrollEntries  PayrollEntry[]
+}
+
+model Customer {
+  id        String   @id @default(cuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  userId    String?  @unique
+  user      User?    @relation("CustomerUser", fields: [userId], references: [id], onDelete: SetNull)
+  name      String
+  email     String?
+  phone     String?
+  address   String?
+  gstin     String?
+  notes     String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  trips     Trip[]
+
+  @@index([tenantId, name])
+  @@index([tenantId, email])
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId, expiresAt])
+}
+
+model Vehicle {
+  id           String   @id @default(cuid())
+  tenantId     String
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  registration String
+  type         String
+  capacity     String?
+  status       String   @default("AVAILABLE")
+  createdAt    DateTime @default(now())
+  trips        Trip[]
+
+  @@unique([tenantId, registration])
+}
+
+model Trip {
+  id                 String        @id @default(cuid())
+  tenantId           String
+  tenant             Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  reference          String
+  customerName       String
+  customerId         String?
+  customer           Customer?     @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  customerEmail      String?
+  origin             String
+  destination        String
+  cargo              String?
+  amount             Decimal       @db.Decimal(12, 2)
+  status             TripStatus    @default(PENDING)
+  pickupAt           DateTime?
+  deliveredAt        DateTime?
+  podImageData       String?       @db.Text
+  podNote            String?
+  deliveryReceivedBy String?
+  pickupContact      String?
+  pickupPhone        String?
+  deliveryContact    String?
+  deliveryPhone      String?
+  notes              String?
+  driverId           String?
+  driver             User?         @relation("DriverTrips", fields: [driverId], references: [id], onDelete: SetNull)
+  vehicleId          String?
+  vehicle            Vehicle?      @relation(fields: [vehicleId], references: [id], onDelete: SetNull)
+  payments           Payment[]
+  expenses           TripExpense[]
+  createdAt          DateTime      @default(now())
+
+  @@unique([tenantId, reference])
+  @@index([tenantId, customerId])
+  @@index([tenantId, status])
+  @@index([tenantId, customerEmail])
+  @@index([tenantId, driverId])
+  @@index([tenantId, vehicleId])
+}
+
+model TripExpense {
+  id          String   @id @default(cuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tripId      String
+  trip        Trip     @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  driverId    String
+  driver      User     @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  category    String
+  amount      Decimal  @db.Decimal(12, 2)
+  note        String?
+  receiptData String?  @db.Text
+  status      String   @default("SUBMITTED")
+  createdAt   DateTime @default(now())
+
+  @@index([tenantId, driverId, createdAt])
+  @@index([tripId])
+}
+
+model PayrollEntry {
+  id           String   @id @default(cuid())
+  tenantId     String
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  userId       String?
+  user         User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  employeeName String
+  period       String
+  amount       Decimal  @db.Decimal(12, 2)
+  status       String   @default("PENDING")
+  note         String?
+  createdAt    DateTime @default(now())
+
+  @@index([tenantId, period])
+  @@index([userId, createdAt])
+}
+
+model Payment {
+  id            String        @id @default(cuid())
+  tenantId      String
+  tenant        Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tripId        String?
+  trip          Trip?         @relation(fields: [tripId], references: [id], onDelete: SetNull)
+  invoiceNumber String
+  description   String
+  amount        Decimal       @db.Decimal(12, 2)
+  status        PaymentStatus @default(DUE)
+  dueDate       DateTime?
+  paidAt        DateTime?
+  createdAt     DateTime      @default(now())
+
+  @@unique([tenantId, invoiceNumber])
+  @@index([tenantId, status])
+}
